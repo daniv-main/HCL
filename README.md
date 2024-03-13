@@ -1,2 +1,2 @@
-# packer_vagrant
-Automated VMs using packer and vagrant.
+# HCL
+Automated VMs with DBs inside docker containers using packer and vagrant. Azure and terraform
