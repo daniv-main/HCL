@@ -1,0 +1,235 @@
+---
+- name: Configure Hadoop Server
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  become: yes
+  tasks:
+#  - Instalar passlib con pip
+    - name: "-1 Instalar passlib con pip"
+      pip:
+        name:
+          - passlib
+          - psycopg2-binary 
+
+#0 - Creamos al usuario hdp 
+    - name: "0 - Creación de hdp"
+      user:
+        name: hdp
+        groups: sudo
+        password: "{{ 'hdp' | password_hash('sha512') }}"
+        shell: /bin/bash
+        generate_ssh_key: yes
+        ssh_key_bits: 2048
+        ssh_key_file: .ssh/id_rsa
+        system: yes
+        create_home: yes
+
+#1 - Instalamos Java 8
+    - name: "1 - Instalamos Java 8: Actualizamos repositorio"
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+    - name: "1.1 - Instalamos Java 8: Instalar OpenJDK 8 "
+      ansible.builtin.apt:
+        name:
+          - openjdk-8-jdk
+          - openjdk-8-jdk-headless
+        state: present     
+
+#2 - Comprobamos nombre de la máquina
+    - name: "2 - Comprueba que el nombre de la máquina es el esperado"
+      ansible.builtin.hostname:
+        name: master
+        use: debian
+
+#3 - Cambiamos el fichero hosts
+    - name: "3 - Cambio de hosts por defecto a hosts.j2"
+      template:
+        src: "hosts.j2"
+        dest: "/etc/hosts"
+        owner: root
+        group: root
+
+#4 - Instalamos SSH   
+    - name: "4 - Instalamos SSH "
+      ansible.builtin.apt:
+        name:
+          - ssh
+        state: present
+
+#5 - Configuramos ssh 
+    - name: "5 - Aseguramos localhost in known_hosts file"
+      known_hosts:
+        name: "localhost"
+        state: present
+        key: "{{ lookup('pipe', 'ssh-keyscan localhost') }}"
+        hash_host: true
+    - name: "5.1 - Aseguramos nodo1 in known_hosts file"
+      known_hosts:
+        name: "master"
+        state: present
+        key: "{{ lookup('pipe', 'ssh-keyscan master') }}"
+        hash_host: true
+
+#6 - Certificado sin password de hadoop
+    - name: "6 - Certificado sin password de hadoop"
+      ansible.posix.authorized_key:
+        user: hdp
+        state: present
+        key: "{{ lookup('file', '/home/hdp/.ssh/id_rsa.pub') }}"
+
+#7 - Descargamos Hadoop
+    - name: "7 - Descargamos Hadoop"
+      get_url:
+        url: https://downloads.apache.org/hadoop/common/hadoop-3.3.6/hadoop-3.3.6.tar.gz
+        dest: /home/hdp/hadoop-3.3.6.tar.gz
+
+#8 - Descomprimimos
+    - name: Descomprimimos hadoop
+      unarchive:
+        src: /home/hdp/hadoop-3.3.6.tar.gz
+        dest: /opt
+        owner: hdp
+        group: hdp
+        creates: /opt/hadoop-3.3.6
+
+#10 - Creamos enlace simbolico a /opt/hadoop
+    - name: Creamos enlace simbolico a /opt/hadoop
+      ansible.builtin.file:
+        src: /opt/hadoop-3.3.6
+        dest: /opt/hadoop
+        state: link
+
+#11 - Editamos el .bashrc de hadoop
+    - name: "11 - Editamos el .bashrc de hadoop"
+      blockinfile:
+        path: /home/hdp/.bashrc
+        block: |
+          export HADOOP_HOME="/opt/hadoop"
+          export HADOOP_CONF_DIR="/opt/hadoop/etc/hadoop"
+          export PATH="/opt/hadoop/bin:/opt/hadoop/sbin:$PATH"
+          export JAVA_HOME="/usr/lib/jvm/java-8-openjdk-amd64"
+          export HADOOP_COMMON_LIB_NATIVE_DIR="$HADOOP_HOME/lib/native"
+          export HADOOP_OPTS="${HADOOP_OPTS} -Djava.library.path=${HADOOP_COMMON_LIB_NATIVE_DIR}"
+        owner: hdp
+        group: hdp
+        mode: '0644'
+        state: present 
+
+#12- Modificamos hadoop-env.sh
+    - name: "12- Modificamos $HADOOP_HOME/etc/hadoop/hadoop-env.sh"
+      blockinfile:
+        path: /opt/hadoop/etc/hadoop/hadoop-env.sh
+        block: |
+          export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+          export HDFS_NAMENODE_USER=hdp
+          export HDFS_DATANODE_USER=hdp
+          export HDFS_SECONDARYNAMENODE_USER=hdp
+
+#13 - core-site.xml
+    - name: "13 - Creamos carpeta /opt/hadoop-3.3.4/var/lib como hdp"
+      ansible.builtin.file:
+        path: /opt/hadoop/var/lib
+        state: directory
+        owner: hdp
+        group: hdp
+        mode: '0755'    
+
+    - name: "13.1 - Copiamos core-site.xml"
+      template:
+        src: "core-site.xml.j2"
+        dest: "/opt/hadoop/etc/hadoop/core-site.xml"
+        owner: hdp
+        group: hdp
+        mode: 0644
+
+#14 - hdfs-site.xml
+    - name: "14 - Copiamos hdfs-site.xml"
+      template:
+        src: "hdfs-site.xml.j2"
+        dest: "/opt/hadoop/etc/hadoop/hdfs-site.xml"
+        owner: hdp
+        group: hdp
+        mode: 0644
+
+# ARRANCAMOS HADOOP 
+- name: Arrancamos Hadoop 
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  become: yes
+  become_user: hdp
+  tasks:
+
+#15 - Formateamos HDFS
+    - name: "15 - Comprobamos si existe almacen HDFS"
+      stat:
+        path: /opt/hadoop/var/lib/dfs
+      register: almacen_dfs 
+    - name: "15.1 - Formateamos HDFS (si no existe almacen)"
+      ansible.builtin.command:
+        cmd: /opt/hadoop/bin/hdfs namenode -format
+      when: not almacen_dfs.stat.exists
+
+#16 - Arrancamos HDFS
+    - name: "16 - Comprobamos si HDFS está arrancado "
+      stat:
+        path: /tmp/hadoop-hadoop-namenode.pid
+      register: arrancado_dfs 
+    - name: "16.1 - Arrancamos HDFS (si no está arrancado)"
+      ansible.builtin.command:
+        cmd: /opt/hadoop/sbin/start-dfs.sh
+      when: not arrancado_dfs.stat.exists
+
+# YARN: configurar y arrancar
+- name: Configurando Yarn
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  become: yes
+  become_user: hdp
+  tasks:
+
+#1 - Añadimos yarn-site.xml
+    - name: "1 - Añadimos yarn-site.xml"
+      template:
+        src: "yarn-site.xml.j2"
+        dest: "/opt/hadoop/etc/hadoop/yarn-site.xml"
+        owner: hdp
+        group: hdp
+        mode: 0644
+
+#2 - Añadimos mapred-site.xml. Map reduce
+    - name: "2 - Añadimos  mapred-site.xml"
+      template:
+        src: "mapred-site.xml.j2"
+        dest: "/opt/hadoop/etc/hadoop/mapred-site.xml"
+        owner: hdp
+        group: hdp
+        mode: 0644
+
+#3 - En el fichero workers añadimos los nodos trabajadores
+    - name: "Yarn-3.Edito $HADOOP_HOME/etc/hadoop/workers y añado los nombres DNS de los nodos trabajadores"
+      copy:
+        content: "{{ ansible_hostname }}"
+        dest: /opt/hadoop/etc/hadoop/workers
+        force: yes
+
+#4 - Arrancamos YARN
+    - name: "Yarn-4a-Comprobamos si está arrancado ResourceManager"
+      stat:
+        path: /tmp/hadoop-hdp-resourcemanager.pid
+      register: arrancado_resourcemanager
+
+    - name: "Yarn-4a-Comprobamos si está arrancado NodeManager"
+      stat:
+        path: /tmp/hadoop-hdp-nodemanager.pid
+      register: arrancado_nodemanager
+
+    - name: "Yarn-4b- Arrancamos YARN (si no está arrancado)"
+      ansible.builtin.command:
+        cmd: /opt/hadoop/sbin/start-yarn.sh
+      when: not arrancado_resourcemanager.stat.exists or not arrancado_nodemanager.stat.exists
+
+

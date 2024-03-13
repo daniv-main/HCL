@@ -1,0 +1,20 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "danielvillegasce/vagrantBD"
+  config.vm.box_version = "1"
+  config.ssh.username = "vagrant"
+  config.ssh.password = "vagrant"
+
+  config.vm.network "forwarded_port", guest: 6379, host: 6379
+  config.vm.network "forwarded_port", guest: 3306, host: 3306
+  config.vm.network "forwarded_port", guest: 9042, host: 9042
+  config.vm.network "forwarded_port", guest: 27017, host: 27017
+
+  config.vm.provision "shell", inline: <<-SHELL
+              sudo service docker restart
+              cd /home/vagrant
+              sudo docker-compose up -d
+  SHELL
+end
